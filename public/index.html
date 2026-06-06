@@ -24,15 +24,18 @@ let W=0,H=0,DPR=1,vertical=true;
 /* ---------- constants ---------- */
 const TAU=Math.PI*2;
 const PLAYER_R=21, BALL_R=17, JS_R=60;
+const WALL_PAD=10, BALL_WALL_R=BALL_R+WALL_PAD;
 const ACCEL=2250, MAX_SPEED=315, P_DRAG=0.90, BALL_DRAG=0.99;
 const CHARGE_TIME=1.1, COOLDOWN=0.35;
 const COUNTDOWN_STEP=1.1, COUNTDOWN_TOTAL=COUNTDOWN_STEP*4;
+const RESPAWN_TIME=2.2;
 const WIN=5;
 const clamp=(v,a,b)=>v<a?a:(v>b?b:v);
 const lerp=(a,b,t)=>a+(b-a)*t;
 const len=(x,y)=>Math.hypot(x,y);
 const rnd=(a,b)=>a+Math.random()*(b-a);
 const fv=a=>({x:Math.cos(a),y:Math.sin(a)});
+const angleDelta=(a,b)=>Math.atan2(Math.sin(b-a),Math.cos(b-a));
 function getCSS(v){return getComputedStyle(document.documentElement).getPropertyValue(v).trim();}
 function alpha(hex,a){const n=parseInt(hex.slice(1),16);return`rgba(${n>>16&255},${n>>8&255},${n&255},${a})`;}
 
@@ -45,7 +48,7 @@ const players=[mkPlayer(0),mkPlayer(1)];
 let ball=mkBall();
 let projectiles=[];
 let segs=[], goals=[], playBounds={left:0,top:0,right:0,bottom:0};
-function mkPlayer(i){return{i,pos:{x:0,y:0},vel:{x:0,y:0},facing:0,health:100,stun:0,charge:0,charging:false,cooldown:0,start:{x:0,y:0,f:0}};}
+function mkPlayer(i){return{i,pos:{x:0,y:0},vel:{x:0,y:0},facing:0,health:100,stun:0,stunMax:0,returnFrom:null,charge:0,charging:false,cooldown:0,start:{x:0,y:0,f:0}};}
 function mkBall(){return{pos:{x:0,y:0},vel:{x:0,y:0},trail:[]};}
 
 /* ---------- input ---------- */
@@ -112,13 +115,27 @@ function placeStarts(){
   }
 }
 function resetPositions(){
-  for(const p of players){p.pos={x:p.start.x,y:p.start.y};p.vel={x:0,y:0};p.facing=p.start.f;p.charge=0;p.charging=false;p.cooldown=0;p.health=100;p.stun=0;}
+  for(const p of players){p.pos={x:p.start.x,y:p.start.y};p.vel={x:0,y:0};p.facing=p.start.f;p.charge=0;p.charging=false;p.cooldown=0;p.health=100;p.stun=0;p.stunMax=0;p.returnFrom=null;}
   ball.pos={x:W/2,y:H/2};ball.vel={x:0,y:0};ball.trail=[];
   projectiles=[];
 }
 function respawnPlayer(p){
   p.pos={x:p.start.x,y:p.start.y};p.vel={x:0,y:0};p.facing=p.start.f;
-  p.health=100;p.stun=0;p.charge=0;p.charging=false;p.cooldown=COOLDOWN;
+  p.health=100;p.stun=0;p.stunMax=0;p.returnFrom=null;p.charge=0;p.charging=false;p.cooldown=COOLDOWN;
+}
+function killPlayer(p){
+  p.health=0;p.stun=RESPAWN_TIME;p.stunMax=RESPAWN_TIME;
+  p.returnFrom={x:p.pos.x,y:p.pos.y,f:p.facing};
+  p.vel={x:0,y:0};p.charge=0;p.charging=false;p.cooldown=COOLDOWN;
+}
+function updateReturningPlayer(p,dt){
+  p.stun=Math.max(0,p.stun-dt);
+  const t=1-(p.stun/(p.stunMax||RESPAWN_TIME));
+  const e=t*t*(3-2*t), from=p.returnFrom||{x:p.pos.x,y:p.pos.y,f:p.facing};
+  p.pos.x=lerp(from.x,p.start.x,e);p.pos.y=lerp(from.y,p.start.y,e);
+  p.facing=from.f+angleDelta(from.f,p.start.f)*e;
+  p.vel.x=0;p.vel.y=0;
+  if(p.stun<=0)respawnPlayer(p);
 }
 function newMatch(){score=[0,0];resetPositions();state='countdown';timer=COUNTDOWN_TOTAL;}
 function countdownLabel(){
@@ -224,6 +241,7 @@ function projectileHitsWall(x0,y0,x1,y1,r){
 }
 function resolvePlayerCollision(){
   const a=players[0],b=players[1];
+  if(a.stun>0||b.stun>0)return;
   let dx=b.pos.x-a.pos.x,dy=b.pos.y-a.pos.y,d=len(dx,dy);
   if(d<0.001){dx=Math.cos(a.facing);dy=Math.sin(a.facing);d=1;}
   const min=PLAYER_R*2+2;
@@ -238,6 +256,7 @@ function resolvePlayerCollision(){
   }
 }
 function resolveBallPlayer(p,applyImpulse){
+  if(p.stun>0)return;
   let dx=ball.pos.x-p.pos.x,dy=ball.pos.y-p.pos.y,d=len(dx,dy);
   if(d<0.001){dx=Math.cos(p.facing);dy=Math.sin(p.facing);d=1;}
   const min=BALL_R+PLAYER_R;
@@ -256,6 +275,7 @@ function resolveBallPlayer(p,applyImpulse){
   }
 }
 function bracePinnedBall(){
+  if(players[0].stun>0||players[1].stun>0)return;
   let dx0=ball.pos.x-players[0].pos.x,dy0=ball.pos.y-players[0].pos.y,d0=len(dx0,dy0);
   let dx1=ball.pos.x-players[1].pos.x,dy1=ball.pos.y-players[1].pos.y,d1=len(dx1,dy1);
   if(d0>=BALL_R+PLAYER_R+2||d1>=BALL_R+PLAYER_R+2||d0<0.001||d1<0.001)return;
@@ -286,12 +306,16 @@ function reflectCircleSeg(o,r){
     if(dd<r&&dd>0.0001){const nx=dx/dd,ny=dy/dd,dot=o.vel.x*nx+o.vel.y*ny;if(dot<0){o.vel.x-=2*dot*nx;o.vel.y-=2*dot*ny;o.pos.x=c.x+nx*(r+0.5);o.pos.y=c.y+ny*(r+0.5);}}
   }
 }
+function clampBallToArena(){
+  ball.pos.x=clamp(ball.pos.x,BALL_WALL_R,W-BALL_WALL_R);
+  ball.pos.y=clamp(ball.pos.y,BALL_WALL_R,H-BALL_WALL_R);
+}
 function update(dt){
   const pdrag=Math.pow(P_DRAG,dt*60), bdrag=Math.pow(BALL_DRAG,dt*60);
   for(const p of players){
     const inp=getInput(p.i);
     p.cooldown=Math.max(0,p.cooldown-dt);
-    if(p.stun>0){p.stun-=dt;p.vel.x*=0.8;p.vel.y*=0.8;p.pos.x+=p.vel.x*dt;p.pos.y+=p.vel.y*dt;clampPlayer(p);if(p.stun<=0)respawnPlayer(p);continue;}
+    if(p.stun>0){updateReturningPlayer(p,dt);continue;}
     // shoot edge logic
     if(inp.shoot&&!p.charging&&p.cooldown<=0){p.charging=true;p.charge=0;}
     if(!inp.shoot&&p.charging){fireShot(p);p.charging=false;p.cooldown=COOLDOWN;}
@@ -316,8 +340,8 @@ function update(dt){
   // ball
   ball.vel.x*=bdrag;ball.vel.y*=bdrag;
   ball.pos.x+=ball.vel.x*dt;ball.pos.y+=ball.vel.y*dt;
-  reflectCircleSeg(ball,BALL_R);
-  for(let k=0;k<6;k++){for(const p of players)resolveBallPlayer(p,k===0);resolvePlayerCollision();bracePinnedBall();reflectCircleSeg(ball,BALL_R);}
+  reflectCircleSeg(ball,BALL_WALL_R);clampBallToArena();
+  for(let k=0;k<6;k++){for(const p of players)resolveBallPlayer(p,k===0);resolvePlayerCollision();bracePinnedBall();reflectCircleSeg(ball,BALL_WALL_R);clampBallToArena();}
   ball.trail.push({x:ball.pos.x,y:ball.pos.y});if(ball.trail.length>10)ball.trail.shift();
   // projectiles
   for(let i=projectiles.length-1;i>=0;i--){
@@ -329,14 +353,14 @@ function update(dt){
     if(db<s.r+BALL_R){const sp=len(s.vel.x,s.vel.y)||1;const k=(s.r/9);ball.vel.x+=s.vel.x/sp*sp*0.9*k;ball.vel.y+=s.vel.y/sp*sp*0.9*k;projectiles.splice(i,1);continue;}
     // opponent
     const o=players[1-s.owner];
-    if(o.stun<=0&&len(o.pos.x-s.pos.x,o.pos.y-s.pos.y)<s.r+PLAYER_R){o.health-=s.damage;const sp=len(s.vel.x,s.vel.y)||1;o.vel.x+=s.vel.x/sp*120;o.vel.y+=s.vel.y/sp*120;if(o.health<=0){o.health=0;o.stun=2.0;}projectiles.splice(i,1);continue;}
+    if(o.stun<=0&&len(o.pos.x-s.pos.x,o.pos.y-s.pos.y)<s.r+PLAYER_R){o.health-=s.damage;const sp=len(s.vel.x,s.vel.y)||1;o.vel.x+=s.vel.x/sp*120;o.vel.y+=s.vel.y/sp*120;if(o.health<=0)killPlayer(o);projectiles.splice(i,1);continue;}
   }
   // goals
   for(const g of goals){if(g.test(ball)){score[g.scorer]++;goalBy=g.scorer;if(score[g.scorer]>=WIN){state='gameover';}else{state='goal';timer=1.2;}return;}}
 }
 function clampPlayer(p){p.pos.x=clamp(p.pos.x,playBounds.left+PLAYER_R,playBounds.right-PLAYER_R);p.pos.y=clamp(p.pos.y,playBounds.top+PLAYER_R,playBounds.bottom-PLAYER_R);}
 function fireShot(p){
-  const f=fv(p.facing);const r=lerp(5,13,p.charge),speed=lerp(420,900,p.charge),dmg=lerp(8,26,p.charge);
+  const f=fv(p.facing);const r=lerp(5,13,p.charge),speed=lerp(420,900,p.charge),dmg=lerp(18,44,p.charge);
   projectiles.push({pos:{x:p.pos.x+f.x*(PLAYER_R+r+2),y:p.pos.y+f.y*(PLAYER_R+r+2)},vel:{x:f.x*speed,y:f.y*speed},r,damage:dmg,owner:p.i,life:2.5});
 }
 
@@ -351,7 +375,7 @@ function drawPitch(){
   for(let y=0;y<=H;y+=step){ctx.moveTo(0,y);ctx.lineTo(W,y);}
   ctx.stroke();
 
-  ctx.save();ctx.strokeStyle='#8d9298';ctx.lineWidth=5;ctx.lineCap='butt';ctx.lineJoin='round';
+  ctx.save();ctx.strokeStyle='#8d9298';ctx.lineWidth=10;ctx.lineCap='butt';ctx.lineJoin='round';
   ctx.beginPath();for(const s of segs){ctx.moveTo(s[0],s[1]);ctx.lineTo(s[2],s[3]);}ctx.stroke();ctx.restore();
 
   ctx.strokeStyle='rgba(255,255,255,0.18)';ctx.lineWidth=2;ctx.setLineDash([9,10]);
@@ -394,16 +418,16 @@ function drawBall(){
   ctx.restore();
 }
 function drawPlayer(p){
-  const col=p.i===0?getCSS('--p1'):getCSS('--p2');
+  const col=p.stun>0?'#8b8f94':(p.i===0?getCSS('--p1'):getCSS('--p2'));
   const sp=len(p.vel.x,p.vel.y),drawR=PLAYER_R+6;
-  ctx.save();ctx.globalAlpha=p.stun>0?0.35:1;
+  ctx.save();ctx.globalAlpha=p.stun>0?0.58:1;
   ctx.strokeStyle=alpha(col,0.22);ctx.lineWidth=2;ctx.beginPath();ctx.arc(p.pos.x,p.pos.y,drawR,0,TAU);ctx.stroke();
   // triangle
   const a=p.facing,fx=Math.cos(a),fy=Math.sin(a);
   const nose={x:p.pos.x+fx*drawR,y:p.pos.y+fy*drawR};
   const l={x:p.pos.x+Math.cos(a+TAU/3)*drawR,y:p.pos.y+Math.sin(a+TAU/3)*drawR};
   const r={x:p.pos.x+Math.cos(a-TAU/3)*drawR,y:p.pos.y+Math.sin(a-TAU/3)*drawR};
-  if(sp>80&&!p.charging){ctx.strokeStyle=alpha(col,0.38);ctx.lineWidth=5;ctx.lineCap='round';ctx.beginPath();ctx.moveTo(p.pos.x-Math.cos(a)*PLAYER_R*0.6,p.pos.y-Math.sin(a)*PLAYER_R*0.6);ctx.lineTo(p.pos.x-Math.cos(a)*(PLAYER_R+10+sp*0.03),p.pos.y-Math.sin(a)*(PLAYER_R+10+sp*0.03));ctx.stroke();}
+  if(sp>80&&!p.charging&&p.stun<=0){ctx.strokeStyle=alpha(col,0.38);ctx.lineWidth=5;ctx.lineCap='round';ctx.beginPath();ctx.moveTo(p.pos.x-Math.cos(a)*PLAYER_R*0.6,p.pos.y-Math.sin(a)*PLAYER_R*0.6);ctx.lineTo(p.pos.x-Math.cos(a)*(PLAYER_R+10+sp*0.03),p.pos.y-Math.sin(a)*(PLAYER_R+10+sp*0.03));ctx.stroke();}
   ctx.shadowColor=col;ctx.shadowBlur=p.charging?18:8;ctx.fillStyle=col;
   ctx.beginPath();ctx.moveTo(nose.x,nose.y);ctx.lineTo(l.x,l.y);ctx.lineTo(r.x,r.y);ctx.closePath();ctx.fill();
   ctx.strokeStyle='rgba(255,255,255,0.82)';ctx.lineWidth=2;ctx.stroke();
@@ -412,7 +436,7 @@ function drawPlayer(p){
   // charge ring
   if(p.charging){const f=fv(p.facing);ctx.save();ctx.shadowColor=col;ctx.shadowBlur=10;ctx.strokeStyle=alpha(col,0.42);ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(p.pos.x+f.x*(PLAYER_R+4),p.pos.y+f.y*(PLAYER_R+4));ctx.lineTo(p.pos.x+f.x*(PLAYER_R+48+p.charge*36),p.pos.y+f.y*(PLAYER_R+48+p.charge*36));ctx.stroke();ctx.strokeStyle=col;ctx.lineWidth=5;ctx.beginPath();ctx.arc(p.pos.x,p.pos.y,PLAYER_R+12,-Math.PI/2,-Math.PI/2+TAU*p.charge);ctx.stroke();ctx.restore();}
   // health bar
-  if(p.health<100||p.stun>0){const bw=34,bx=p.pos.x-bw/2,by=p.pos.y-PLAYER_R-12;ctx.fillStyle='rgba(255,255,255,0.15)';ctx.fillRect(bx,by,bw,4);ctx.fillStyle=col;ctx.fillRect(bx,by,bw*clamp(p.health/100,0,1),4);}
+  if(p.health<100&&p.stun<=0){const bw=34,bx=p.pos.x-bw/2,by=p.pos.y-PLAYER_R-12;ctx.fillStyle='rgba(255,255,255,0.15)';ctx.fillRect(bx,by,bw,4);ctx.fillStyle=col;ctx.fillRect(bx,by,bw*clamp(p.health/100,0,1),4);}
 }
 function drawProjectiles(){
   for(const s of projectiles){const col=s.owner===0?getCSS('--p1'):getCSS('--p2');const a=Math.atan2(s.vel.y,s.vel.x);
